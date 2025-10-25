@@ -1,6 +1,7 @@
 use crossbeam_channel::{self, Receiver, Sender};
 use log::{error, info};
 use serde::Serialize;
+use smallvec::SmallVec;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Error as IoError, Write};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 // Capacité maximale de la file d'attente avant que `write` ne devienne bloquant.
-const CHANNEL_CAPACITY: usize = 10000;
+const CHANNEL_CAPACITY: usize = 16384;
+
+// Taille du buffer d'écriture (64KB pour réduire les syscalls)
+const BUFFER_SIZE: usize = 65536;
+
+// Capacité inline de SmallVec pour les sync notifiers (évite heap allocation)
+const INLINE_NOTIFIERS: usize = 4;
 
 /// Erreur d'envoi de tâche d'écriture
 #[derive(Debug)]
@@ -195,8 +202,8 @@ fn jsonl_worker_fn(
         .create(true)
         .open(&file_path)?;
 
-    // 3. Utiliser BufWriter pour le batching automatique des I/O
-    let mut writer = BufWriter::new(file);
+    // 3. Utiliser BufWriter avec buffer 64KB pour le batching automatique des I/O
+    let mut writer = BufWriter::with_capacity(BUFFER_SIZE, file);
 
     info!("JSONL worker is ready for file: {:?}", file_path);
 
@@ -209,7 +216,7 @@ fn jsonl_worker_fn(
     }
 
     // 5. Boucle principale de traitement par lots
-    let mut sync_notifiers: Vec<Sender<()>> = Vec::new();
+    let mut sync_notifiers: SmallVec<[Sender<()>; INLINE_NOTIFIERS]> = SmallVec::new();
 
     // Attend la première tâche (bloquant)
     while let Ok(first_task) = receiver.recv() {
@@ -260,7 +267,7 @@ fn jsonl_worker_fn(
 fn process_task(
     task: JsonlTask,
     writer: &mut BufWriter<File>,
-    notifiers: &mut Vec<Sender<()>>,
+    notifiers: &mut SmallVec<[Sender<()>; INLINE_NOTIFIERS]>,
 ) -> Result<WorkerAction, IoError> {
     match task {
         JsonlTask::Write(task) => {
