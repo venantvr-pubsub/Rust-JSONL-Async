@@ -1,0 +1,6 @@
+# Fichiers IDE
+.idea/
+.vscode/
+
+# Artéfacts de compilation Rust
+/target/
